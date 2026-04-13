@@ -170,7 +170,4 @@ def main(page: ft.Page):
         show_mobile_screen()
 
 
-#-- ft.app(target=main)
-#ft.run(main, view=ft.AppView.WEB_BROWSER)
-ft.app(target=main, view=ft.AppView.WEB_BROWSER)
-
+ft.app(target=main)
