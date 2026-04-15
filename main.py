@@ -1,11 +1,56 @@
 import flet as ft
-import asyncio
 import uuid
+import json
+
 from api import generate_otp, login
-from storage import save_auth, load_auth, clear_auth
+from storage import save_auth, load_auth, clear_auth, LOCAL_STORAGE_KEY
 
 SITE_URL = "https://app.pakhshmart.com"
 DEVICE_ID = str(uuid.uuid4())
+
+
+def extract_auth_token(auth_data: dict) -> str:
+    if not isinstance(auth_data, dict):
+        return ""
+
+    token_value = auth_data.get("token")
+
+    if isinstance(token_value, dict):
+        return token_value.get("authToken", "") or ""
+
+    if isinstance(token_value, str):
+        return token_value
+
+    return ""
+
+
+def normalize_auth_data(auth_data: dict) -> dict | None:
+    if not isinstance(auth_data, dict):
+        return None
+
+    token_value = auth_data.get("token")
+
+    # فرمت جدید
+    if isinstance(token_value, dict) and token_value.get("authToken"):
+        return auth_data
+
+    # فرمت قدیمی
+    if isinstance(token_value, str) and token_value:
+        return {
+            "token": {
+                "authToken": token_value,
+                "expiresIn": ""
+            },
+            "shopId": auth_data.get("shopId"),
+            "mobile": auth_data.get("mobile", ""),
+            "tagCode": auth_data.get("tagCode"),
+            "activeDistributor": auth_data.get("activeDistributor"),
+            "expirationDate": auth_data.get("expiration", ""),
+            "errorMessage": None,
+            "logingErrorCode": None,
+        }
+
+    return None
 
 
 def main(page: ft.Page):
@@ -14,19 +59,46 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 0
 
-    auth = load_auth()
+    raw_auth = load_auth()
+    auth = normalize_auth_data(raw_auth)
 
-    def show_webview():
+    def make_local_storage_script(auth_data: dict) -> str:
+        auth_json = json.dumps(auth_data, ensure_ascii=False)
+        return f"""
+(function() {{
+    try {{
+        localStorage.setItem("{LOCAL_STORAGE_KEY}", JSON.stringify({auth_json}));
+        console.log("mart-user saved");
+        setTimeout(function() {{
+            window.location.reload();
+        }}, 300);
+    }} catch (e) {{
+        console.error("localStorage injection failed:", e);
+    }}
+}})();
+"""
+
+    def show_webview(auth_data: dict):
         page.controls.clear()
-        page.add(
-            ft.WebView(
-                url=SITE_URL,
-                expand=True,
-                on_page_started=lambda e: print("loading..."),
-                on_page_ended=lambda e: print("loaded"),
-            )
+
+        webview = ft.WebView(
+            url=SITE_URL,
+            expand=True,
+            on_page_started=lambda e: print("loading..."),
+            on_page_ended=lambda e: print("loaded"),
         )
+
+        page.add(webview)
         page.update()
+
+        async def inject():
+            try:
+                script = make_local_storage_script(auth_data)
+                await webview.run_javascript(script)
+            except Exception as ex:
+                print("js inject error:", ex)
+
+        page.run_task(inject)
 
     def show_otp_screen(mobile: str, remaining: int):
         otp_field = ft.TextField(
@@ -53,14 +125,14 @@ def main(page: ft.Page):
 
             try:
                 result = await login(mobile, code, DEVICE_ID)
-                token_obj = result.get("token", {})
-                auth_token = token_obj.get("authToken", "")
-                expiration = token_obj.get("expirationDate", "")
-                error = result.get("errorMessage", "")
+
+                token_obj = result.get("token", {}) if isinstance(result, dict) else {}
+                auth_token = token_obj.get("authToken", "") if isinstance(token_obj, dict) else ""
+                error = result.get("errorMessage", "") if isinstance(result, dict) else "خطا در ورود"
 
                 if auth_token:
-                    save_auth(mobile, auth_token, expiration)
-                    show_webview()
+                    save_auth(result)
+                    show_webview(result)
                 else:
                     status_text.value = error or "کد اشتباه است"
             except Exception as ex:
@@ -71,12 +143,19 @@ def main(page: ft.Page):
 
         async def resend_otp(e):
             try:
-                await generate_otp(mobile)
-                status_text.value = "کد مجدداً ارسال شد"
-                status_text.color = ft.Colors.GREEN
+                result = await generate_otp(mobile)
+                error = result.get("errorMessage", "") if isinstance(result, dict) else ""
+
+                if error:
+                    status_text.value = error
+                    status_text.color = ft.Colors.RED
+                else:
+                    status_text.value = "کد مجدداً ارسال شد"
+                    status_text.color = ft.Colors.GREEN
             except Exception as ex:
                 status_text.value = f"خطا: {ex}"
                 status_text.color = ft.Colors.RED
+
             page.update()
 
         page.controls.clear()
@@ -127,8 +206,8 @@ def main(page: ft.Page):
 
             try:
                 result = await generate_otp(mobile)
-                remaining = result.get("remainingTime", 120)
-                error = result.get("errorMessage", "")
+                remaining = result.get("remainingTime", 120) if isinstance(result, dict) else 120
+                error = result.get("errorMessage", "") if isinstance(result, dict) else ""
 
                 if error:
                     status_text.value = error
@@ -164,10 +243,12 @@ def main(page: ft.Page):
         )
         page.update()
 
-    if auth and auth.get("token"):
-        show_webview()
+    if auth and extract_auth_token(auth):
+        show_webview(auth)
     else:
         show_mobile_screen()
 
 
+#-- ft.app(target=main, view=ft.AppView.WEB_BROWSER)
 ft.app(target=main)
+
